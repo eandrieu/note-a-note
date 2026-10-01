@@ -23,7 +23,7 @@
   --good:#16884F; --good-soft:#D6F2E2; --bad:#C93A2B; --bad-soft:#FBE1DC;
   --star:#F0AE00; --star-empty:#D3DAEA; --scrim:rgba(20,28,58,.45);
   --paper:#FFFFFF; --paper-ink:#1B2240; --paper-muted:#6A7396; --paper-hl:#E3EBFF;
-  --paper-good:#16884F; --paper-bad:#D23C2C;
+  --paper-good:#16884F; --paper-bad:#D23C2C; --paper-warn:#B36B00;
   --key-white:#FFFFFF; --key-edge:#B8C2D8; --key-black:#1E2540;
   --shadow:0 1px 0 rgba(27,34,64,.06), 0 10px 28px rgba(27,34,64,.09);
   --f-display:"Grandstander", "Chalkboard SE", "Comic Sans MS", system-ui, sans-serif;
@@ -88,21 +88,23 @@ button,input,select{font:inherit;color:inherit}
 /* Consigne et partition */
 .prompt{font-family:var(--f-display);font-weight:700;font-size:clamp(1.15rem,2.6vw,1.55rem);margin:4px 0 0;text-wrap:balance}
 .sheet{background:var(--paper);border-radius:var(--r);box-shadow:var(--shadow);padding:6px 10px;overflow:hidden}
-#staff{display:block;width:100%;height:auto}
-#staff .sl{stroke:var(--paper-ink);stroke-width:1.8}
-#staff .clef{fill:var(--paper-ink)}
-#staff .hl{fill:var(--paper-hl)}
-#staff .note{color:var(--paper-ink)}
-#staff .note path{fill:currentColor}
-#staff .note line{stroke:currentColor;stroke-width:2.4;stroke-linecap:round}
-#staff .note.done{color:var(--paper-good)}
-#staff .note.wrong{color:var(--paper-bad);animation:shake .45s ease}
-#staff .note.just{animation:pop .5s cubic-bezier(.3,1.6,.5,1)}
-#staff .note.ghost{color:var(--paper-bad);opacity:.5}
-#staff .note{transform-box:fill-box;transform-origin:center}
-#staff .nm{font-family:var(--f-display);font-weight:700;font-size:25px;fill:var(--paper-muted)}
-#staff .nm.done{fill:var(--paper-good)}
-#staff .nm.cur{fill:var(--accent)}
+.staff{display:block;width:100%;height:auto}
+.staff .sl{stroke:var(--paper-ink);stroke-width:1.8}
+.staff .clef{fill:var(--paper-ink)}
+.staff .hl{fill:var(--paper-hl)}
+.staff .note{color:var(--paper-ink)}
+.staff .note path{fill:currentColor}
+.staff .note line{stroke:currentColor;stroke-width:2.4;stroke-linecap:round}
+.staff .note.done{color:var(--paper-good)}
+.staff .note.wrong{color:var(--paper-bad);animation:shake .45s ease}
+.staff .note.just{animation:pop .5s cubic-bezier(.3,1.6,.5,1)}
+.staff .note.ghost{color:var(--paper-bad);opacity:.5}
+.staff .note{transform-box:fill-box;transform-origin:center}
+.staff .nm{font-family:var(--f-display);font-weight:700;font-size:25px;fill:var(--paper-muted)}
+.staff .nm.done{fill:var(--paper-good)}
+.staff .nm.cur{fill:var(--accent)}
+.staff .note.warnn{color:var(--paper-warn)}
+.staff .nm.warnn{fill:var(--paper-warn)}
 
 .msg{min-height:2.2em;margin:0;font-family:var(--f-display);font-weight:700;font-size:clamp(1.25rem,3vw,1.7rem);text-align:center;text-wrap:balance}
 .msg.good{color:var(--good)}
@@ -174,6 +176,14 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 .diag .ok{color:var(--good)}
 .diag .ko{color:var(--bad)}
 .big-star{width:84px;height:84px;justify-self:center}
+.panel.wide{max-width:920px}
+.calbar{height:10px;border-radius:99px;background:var(--line);overflow:hidden}
+.calbar i{display:block;height:100%;width:0;background:var(--accent);border-radius:99px;transition:width .1s linear}
+.calhint{margin:0;font-family:var(--f-display);font-weight:700;font-size:1.15rem;color:var(--bad)}
+.calsum{display:grid;grid-template-columns:auto 1fr;gap:6px 16px;margin:0;font-size:1rem}
+.calsum dt{color:var(--muted)}
+.calsum dd{margin:0;font-weight:700;min-width:0}
+.report{width:100%;min-height:120px;font:12px/1.4 ui-monospace,Menlo,monospace;border-radius:10px;border:1.5px solid var(--line);background:var(--bg);color:var(--ink);padding:8px}
 .big-star path{fill:var(--star)}
 .celebrate{text-align:center;justify-items:center}
 
@@ -204,7 +214,7 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 
   <p class="prompt" id="prompt">Quelle est cette note ? Joue-la au piano.</p>
   <div class="sheet">
-    <svg id="staff" viewBox="0 0 760 252" role="img" aria-label="Portée en clé de sol"></svg>
+    <svg id="staff" class="staff" viewBox="0 0 760 252" role="img" aria-label="Portée en clé de sol"></svg>
   </div>
   <p class="msg" id="msg" aria-live="polite"></p>
 
@@ -240,6 +250,20 @@ input[type=range]{width:100%;accent-color:var(--accent)}
   </div>
 </div>
 
+<!-- Calibrage du micro -->
+<div class="overlay" id="calib" hidden>
+  <div class="panel wide" role="dialog" aria-modal="true" aria-labelledby="calTitle">
+    <h2 id="calTitle">Calibrage du micro</h2>
+    <p class="lead" id="calText"></p>
+    <div class="calbar" id="calBar"><i id="calProg"></i></div>
+    <div class="sheet"><svg id="calStaff" class="staff" viewBox="0 0 760 252" role="img" aria-label="Gamme à jouer"></svg></div>
+    <p class="calhint" id="calHint" aria-live="polite" hidden></p>
+    <dl class="calsum" id="calSum" hidden></dl>
+    <textarea class="report" id="calReport" readonly hidden aria-label="Rapport de calibrage"></textarea>
+    <div class="row" id="calActions"></div>
+  </div>
+</div>
+
 <!-- Passage de niveau -->
 <div class="overlay" id="levelup" hidden>
   <div class="panel celebrate" role="dialog" aria-modal="true" aria-labelledby="luTitle">
@@ -257,6 +281,7 @@ input[type=range]{width:100%;accent-color:var(--accent)}
     <form class="form" id="setForm">
       <div class="diag" id="diag">
         <h3>Test du micro</h3>
+        <p class="small" id="calStatus"></p>
         <p class="small" id="diagOff">Le micro n'est pas encore activé : fermez les réglages et touchez « Commencer » avec l'option Micro.</p>
         <div id="diagOn" hidden>
           <p class="small">Jouez une note au piano : la barre doit dépasser le trait et la note doit s'afficher.</p>
@@ -266,6 +291,11 @@ input[type=range]{width:100%;accent-color:var(--accent)}
             <dt>Note entendue</dt><dd id="dNote">…</dd>
             <dt>Accordage du piano</dt><dd id="dTune">…</dd>
           </dl>
+          <div class="row">
+            <button class="btn small" type="button" id="recalBtn">Refaire le calibrage</button>
+            <button class="btn ghost small" type="button" id="reportBtn">Copier le rapport pour Claude</button>
+          </div>
+          <textarea class="report" id="setReport" readonly hidden aria-label="Rapport du micro"></textarea>
         </div>
       </div>
       <div class="field">
@@ -347,7 +377,7 @@ const saveAll = () => { store.set('settings', settings); store.set('progress', p
 
 /* ---------- Écoute : hauteur (YIN), une frappe = un événement, accordage du piano ---------- */
 function detectPitch(buf, sr, d){
-  const minF = 70, maxF = 1400, thr = 0.2, fallback = 0.35;
+  const minF = 120, maxF = 1400, thr = 0.2, fallback = 0.35;
   const maxTau = Math.min(Math.floor(sr / minF), buf.length >> 1);
   const minTau = Math.max(2, Math.floor(sr / maxF));
   const W = buf.length - maxTau;
@@ -377,16 +407,17 @@ function detectPitch(buf, sr, d){
 
 // o = { sr, gateFor(), framesNeeded(midi), onNote(midi), tuning }
 function createListener(o){
-  const d = new Float32Array(Math.floor(o.sr / 70) + 2);
+  const d = new Float32Array(Math.floor(o.sr / 120) + 2);
   const t0 = o.tuning || 0;
-  const st = { noise:null, recent:[], hist:[], fired:new Set(), wasOnset:false,
+  const st = { noise:null, recent:[], hist:[], fired:new Set(), wasOnset:false, peak:0,
                ts:Math.sin(2 * Math.PI * t0), tc:Math.cos(2 * Math.PI * t0), tn:t0 ? 40 : 0 };
   // Décalage d'accordage du piano, en demi-tons (moyenne circulaire des écarts mesurés)
   const offset = () => st.tn < 6 ? 0 : Math.atan2(st.ts, st.tc) / (2 * Math.PI);
-  const reset = () => { st.hist = []; st.fired.clear(); };
+  const reset = () => { st.hist = []; st.fired.clear(); st.peak = 0; };
   return {
     get tuning(){ return offset(); },
     get learned(){ return st.tn; },
+    setTuning(v){ st.ts = Math.sin(2 * Math.PI * v); st.tc = Math.cos(2 * Math.PI * v); st.tn = 200; },
     reset,
     process(buf, muted){
       let s = 0; for (let i = 0; i < buf.length; i++) s += buf[i] * buf[i];
@@ -394,7 +425,7 @@ function createListener(o){
       const userGate = o.gateFor();
       if (st.noise === null) st.noise = rms;
       const gate = Math.max(userGate, Math.min(st.noise * 2.5, userGate * 6));
-      const info = { rms, gate, freq:null, midi:null, cents:null };
+      const info = { rms, gate, freq:null, midi:null, cents:null, mRaw:null, clarity:0 };
       st.recent.push(rms); if (st.recent.length > 6) st.recent.shift();
       if (muted){ st.hist = []; return info; }
       if (rms < gate * 0.7){
@@ -406,35 +437,118 @@ function createListener(o){
       const onset = st.recent.length >= 4 && rms > minR * 1.8;
       if (onset && !st.wasOnset) reset();
       st.wasOnset = onset;
+      st.peak = Math.max(st.peak, rms);
       let midi = null;
       if (rms > gate){
         const p = detectPitch(buf, o.sr, d);
         if (p){
           const m = 69 + 12 * Math.log2(p.freq / 440);
-          info.freq = p.freq;
+          info.freq = p.freq; info.mRaw = m; info.clarity = p.clarity;
           if (p.clarity > 0.8){
             const ph = 2 * Math.PI * (m - Math.round(m)), a = Math.max(0.02, 1 / (st.tn + 1));
             st.ts += a * (Math.sin(ph) - st.ts); st.tc += a * (Math.cos(ph) - st.tc); st.tn++;
           }
           const mc = m - offset(), r = Math.round(mc);
-          if (Math.abs(mc - r) < 0.42 && r >= 36 && r <= 96){ midi = r; info.cents = Math.round((mc - r) * 100); }
+          if (Math.abs(mc - r) < 0.42 && r >= 36 && r <= 96){ midi = r; info.mc = mc; info.cents = Math.round((mc - r) * 100); }
         } else {
           st.noise = rms < st.noise ? st.noise * 0.8 + rms * 0.2 : st.noise * 1.002;
         }
       }
       info.midi = midi;
-      st.hist.push(midi); if (st.hist.length > 7) st.hist.shift();
+      st.hist.push(midi === null ? null : { midi, mc:info.mc }); if (st.hist.length > 7) st.hist.shift();
       // Une note déjà validée depuis la dernière frappe ne compte plus, même si l'écho bascule d'octave
       if (midi !== null && !st.fired.has(midi % 12)){
         const need = o.framesNeeded(midi), win = need <= 3 ? 5 : 7;
-        let votes = 0; for (const x of st.hist.slice(-win)) if (x === midi) votes++;
-        if (votes >= need){ st.fired.add(midi % 12); o.onNote(midi); }
+        // Une note de piano garde une hauteur fixe ; une voix glisse : on exige une hauteur stable
+        let votes = 0, lo = 99, hi = -99;
+        for (const x of st.hist.slice(-win)) if (x && x.midi === midi){ votes++; lo = Math.min(lo, x.mc); hi = Math.max(hi, x.mc); }
+        if (hi - lo > (need <= 3 ? 0.25 : 0.08)) votes = 0;
+        // Une erreur ne compte que sur un son franc, pas sur la fin d'une note qui s'éteint
+        if (votes >= need && (need <= 3 || rms >= st.peak * 0.35)){ st.fired.add(midi % 12); o.onNote(midi); }
       }
       return info;
     }
   };
 }
-const gateFor = () => Math.pow(10, -2 - 1.5 * settings.sensitivity);
+const gateFor = () => {
+  // Pendant le calibrage, on écoute tout ce qui dépasse le bruit de la pièce
+  if (typeof cal !== 'undefined' && cal.run && cal.run.state.phase !== 'done') return 0.0003;
+  const base = settings.calib && settings.calib.gate ? settings.calib.gate : Math.pow(10, -2.75);
+  return base * Math.pow(10, (0.5 - settings.sensitivity) * 1.6);
+};
+
+/* ---------- Calibrage : silence, puis gamme depuis le Do du milieu ---------- */
+function quantile(a, q){ if (!a.length) return 0; const s = a.slice().sort((x, y) => x - y); return s[Math.min(s.length - 1, Math.round(q * (s.length - 1)))]; }
+function createCalibrator(notes, cb){
+  const S = { phase:'silence', t0:null, silence:[], idx:0, tries:0, capturing:false, cap:[], skip:0, recent:[],
+              waitFrom:0, readyAt:0, results:[], noise:0, noise90:0, hint:null, summary:null, progress:0 };
+  const CAP = 18;
+  function feed(info, now){
+    if (S.phase === 'done') return;
+    if (S.t0 === null) S.t0 = now;
+    if (S.phase === 'silence'){
+      S.silence.push(info.rms);
+      S.progress = Math.min(1, (now - S.t0) / 2000);
+      if (S.progress >= 1){
+        S.noise = quantile(S.silence, 0.5); S.noise90 = quantile(S.silence, 0.9);
+        S.phase = 'note'; S.waitFrom = now; S.readyAt = now;
+        cb.onState(S);
+      } else if (cb.onProgress) cb.onProgress(S.progress);
+      return;
+    }
+    const thr = Math.max(S.noise90 * 3, 0.0004);
+    S.recent.push(info.rms); if (S.recent.length > 5) S.recent.shift();
+    if (!S.capturing){
+      const prevMin = Math.min.apply(null, S.recent.slice(0, -1));
+      if (now >= S.readyAt && info.rms > thr && S.recent.length >= 3 && info.rms > prevMin * 1.6){
+        S.capturing = true; S.cap = []; S.skip = 2;
+      } else if (!S.hint && now - S.waitFrom > 7000){ S.hint = 'quiet'; cb.onState(S); }
+      return;
+    }
+    if (S.skip > 0){ S.skip--; return; }
+    S.cap.push({ rms:info.rms, m:info.mRaw });
+    if (info.rms < thr * 0.6 && S.cap.length < 8){ S.capturing = false; return; }
+    if (S.cap.length >= CAP) finishNote(now);
+  }
+  function finishNote(now){
+    S.capturing = false;
+    const exp = notes[S.idx], devs = [];
+    S.cap.forEach(c => { if (c.m === null) return; let x = c.m - exp; x -= 12 * Math.round(x / 12); if (Math.abs(x) < 0.6) devs.push(x); });
+    const off = devs.length ? quantile(devs, 0.5) : 0, hist = {};
+    S.cap.forEach(c => { if (c.m !== null){ const pc = mod(Math.round(c.m - off), 12); hist[pc] = (hist[pc] || 0) + 1; } });
+    const top = Object.keys(hist).sort((a, b) => hist[b] - hist[a])[0];
+    const res = { midi:exp, level:quantile(S.cap.map(c => c.rms), 0.5), agree:devs.length / S.cap.length, devs,
+                  heard:top === undefined ? null : +top };
+    res.ok = res.agree >= 0.5;
+    if (!res.ok && S.tries === 0){ S.tries = 1; S.hint = 'retry'; S.waitFrom = now; S.readyAt = now + 300; cb.onState(S); return; }
+    S.results[S.idx] = res; next(now);
+  }
+  function next(now){
+    S.idx++; S.tries = 0; S.hint = null; S.waitFrom = now; S.readyAt = now + 300; S.capturing = false;
+    if (S.idx >= notes.length) return done();
+    cb.onState(S);
+  }
+  function done(){
+    S.phase = 'done';
+    const ok = S.results.filter(r => r && r.ok);
+    const devs = [].concat.apply([], ok.map(r => r.devs));
+    const minLevel = ok.length ? Math.min.apply(null, ok.map(r => r.level)) : 0;
+    const lo = Math.max(S.noise90 * 2.5, 0.0003), hi = minLevel * 0.3;
+    S.summary = {
+      tuning: devs.length ? quantile(devs, 0.5) : 0,
+      gate: hi > lo ? Math.sqrt(lo * hi) : lo,
+      noise: S.noise, minLevel, weak: hi < lo * 2,
+      okCount: ok.length, total: notes.length,
+      bad: S.results.filter(r => !r || !r.ok).map(r => r.midi),
+      notes: S.results.map(r => ({ midi:r.midi, level:r.level, agree:r.agree, ok:!!r.ok, heard:r.heard }))
+    };
+    cb.onState(S);
+  }
+  return {
+    state: S, feed,
+    skip(now){ S.results[S.idx] = { midi:notes[S.idx], skipped:true, ok:false, level:0, agree:0, devs:[], heard:null }; next(now); }
+  };
+}
 
 /* ---------- Sons ---------- */
 const audio = {
@@ -505,6 +619,7 @@ const mic = {
     if (audio.ctx && audio.ctx.state !== 'running') audio.ctx.resume();
     this.analyser.getFloatTimeDomainData(this.buf);
     const info = this.listener.process(this.buf, performance.now() < audio.muteUntil);
+    if (cal.run && cal.run.state.phase !== 'done') cal.run.feed(info, performance.now());
     if (++this.frames % 120 === 0 && this.listener.learned > 20){
       const tu = Math.round(this.listener.tuning * 100) / 100;
       if (tu !== this.savedTuning){ this.savedTuning = tu; store.set('tuning', tu); }
@@ -569,31 +684,137 @@ function ledgers(d, cx){
 }
 const head = (cx, y) => `<path transform="translate(${(cx - 18.57).toFixed(2)} ${y}) scale(${K} ${-K})" d="${HEAD}"/>`;
 
-function renderStaff(opts = {}){
-  const r = game.round, L = r.targets.length;
-  const x0 = 150, x1 = 740, sp = (x1 - x0) / L;
-  let h = '';
+function staffSVG(items){
+  const L = items.length, x0 = 150, x1 = 740, sp = (x1 - x0) / L, hw = Math.min(34, sp / 2 - 3);
+  let h = '', names = '';
   for (let i = 0; i < 5; i++) h += `<line class="sl" x1="14" x2="746" y1="${TOP + i * S}" y2="${TOP + i * S}"/>`;
   h += `<path class="clef" transform="translate(30 ${TOP + 3 * S}) scale(${K} ${-K})" d="${CLEF}"/>`;
-  let names = '';
-  r.targets.forEach((d, i) => {
-    const cx = x0 + sp * (i + 0.5), y = yOf(d);
+  items.forEach((it, i) => {
+    const cx = x0 + sp * (i + 0.5);
+    if (it.hl) h += `<rect class="hl" x="${cx - hw}" y="30" width="${2 * hw}" height="194" rx="${Math.min(18, hw)}"/>`;
+    h += `<g class="note ${it.cls || ''}">${ledgers(it.d, cx)}${head(cx, yOf(it.d))}</g>`;
+    if (it.name) names += `<text class="nm ${it.nameCls || ''}" x="${cx}" y="246" text-anchor="middle">${dName(it.d)}</text>`;
+    if (it.ghost != null) h += `<g class="note ghost">${ledgers(it.ghost, cx + 34)}${head(cx + 34, yOf(it.ghost))}</g>`;
+  });
+  return h + names;
+}
+function renderStaff(opts = {}){
+  const r = game.round;
+  $('#staff').innerHTML = staffSVG(r.targets.map((d, i) => {
     const state = i < r.idx ? 'done' : (i === r.idx && !r.done ? 'cur' : 'todo');
-    if (state === 'cur') h += `<rect class="hl" x="${cx - 34}" y="30" width="68" height="194" rx="18"/>`;
-    let cls = 'note ' + state;
+    let cls = state;
     if (state === 'cur' && opts.wrong != null) cls += ' wrong';
     if (i === opts.just) cls += ' just';
-    h += `<g class="${cls}">${ledgers(d, cx)}${head(cx, y)}</g>`;
-    const show = settings.names === 'always'
+    const name = settings.names === 'always'
       || (r.done && settings.names !== 'never')
       || (state === 'cur' && settings.names === 'hint' && r.wrongHere >= 2);
-    if (show) names += `<text class="nm ${state}" x="${cx}" y="246" text-anchor="middle">${dName(d)}</text>`;
+    let ghost = null;
     if (state === 'cur' && opts.wrong != null){
       const gd = midiToD(opts.wrong);
-      if (gd !== null && gd >= -3 && gd <= 15 && gd !== d) h += `<g class="note ghost">${ledgers(gd, cx + 34)}${head(cx + 34, yOf(gd))}</g>`;
+      if (gd !== null && gd >= -3 && gd <= 15 && gd !== d) ghost = gd;
     }
+    return { d, cls, hl:state === 'cur', name, nameCls:state, ghost };
+  }));
+}
+
+/* ---------- Écran de calibrage ---------- */
+const cal = { run:null, ds:[], after:null };
+const CAL_HINT = {
+  quiet: "Je n'entends rien. Joue un peu plus fort, ou rapproche la tablette du piano.",
+  retry: "Je n'ai pas bien entendu. Rejoue la même note, bien appuyée."
+};
+function startCalibration(after){
+  const rg = RANGES[settings.range] || RANGES.octave;
+  cal.ds = []; for (let d = 0; d <= Math.max(7, rg.hi); d++) cal.ds.push(d);
+  cal.after = after;
+  cal.run = createCalibrator(cal.ds.map(dToMidi), {
+    onState: renderCalib,
+    onProgress: p => { $('#calProg').style.width = (p * 100).toFixed(1) + '%'; }
   });
-  $('#staff').innerHTML = h + names;
+  $('#calReport').hidden = true;
+  $('#calib').hidden = false;
+  renderCalib(cal.run.state);
+}
+function endCalibration(save){
+  const S = cal.run.state;
+  if (save && S.summary){
+    const s = S.summary;
+    settings.calib = { gate:s.gate, tuning:s.tuning, noise:s.noise, minLevel:s.minLevel, at:Date.now(),
+                       okCount:s.okCount, total:s.total, notes:s.notes };
+    store.set('settings', settings);
+    if (mic.listener) mic.listener.setTuning(s.tuning);
+  }
+  cal.run = null;
+  $('#calib').hidden = true;
+  if (cal.after) cal.after();
+}
+function calButton(label, kind, fn){
+  const b = document.createElement('button'); b.type = 'button'; b.className = 'btn' + (kind ? ' ' + kind : '');
+  b.textContent = label; b.onclick = fn; $('#calActions').appendChild(b); return b;
+}
+function tuningText(semi){
+  const c = Math.round(semi * 100);
+  return Math.abs(c) < 6 ? 'juste' : `${Math.abs(c)} centièmes de demi-ton ${c < 0 ? 'trop bas' : 'trop haut'}, compensé automatiquement`;
+}
+function renderCalib(S){
+  const cur = S.phase === 'note' ? S.idx : -1;
+  $('#calStaff').innerHTML = staffSVG(cal.ds.map((d, i) => {
+    const r = S.results[i];
+    const cls = r ? (r.ok ? 'done' : 'warnn') : (i === cur ? 'cur' : 'todo');
+    return { d, cls, hl:i === cur, name:true, nameCls:cls };
+  }));
+  $('#calActions').innerHTML = '';
+  $('#calBar').hidden = S.phase !== 'silence';
+  $('#calHint').hidden = !S.hint; $('#calHint').textContent = S.hint ? CAL_HINT[S.hint] : '';
+  $('#calSum').hidden = S.phase !== 'done';
+  if (S.phase === 'silence'){
+    $('#calTitle').textContent = 'Calibrage du micro';
+    $('#calText').textContent = "Chut ! Ne joue rien pendant deux secondes : j'écoute le bruit de la pièce.";
+    calButton('Passer le calibrage', 'ghost', () => endCalibration(false));
+  } else if (S.phase === 'note'){
+    $('#calTitle').textContent = 'Calibrage du micro';
+    $('#calText').textContent = S.idx === 0
+      ? 'Maintenant, joue la gamme en montant, une note à la fois, sans te presser. On commence par le Do du milieu.'
+      : `Bien. Joue maintenant le ${dName(cal.ds[S.idx])}.`;
+    calButton('Passer cette note', 'ghost small', () => cal.run.skip(performance.now()));
+    calButton('Arrêter', 'ghost small', () => endCalibration(false));
+  } else {
+    const s = S.summary, enough = s.okCount >= 3;
+    $('#calTitle').textContent = enough ? "C'est réglé !" : 'Calibrage incomplet';
+    $('#calText').textContent = enough
+      ? "L'appli connaît maintenant le son de ton piano."
+      : "Je n'ai pas assez bien entendu le piano pour me régler. Rapproche la tablette du piano et recommence.";
+    const bad = s.bad.map(m => PC_NAME[mod(m, 12)]).join(', ');
+    $('#calSum').innerHTML =
+      `<dt>Notes bien entendues</dt><dd>${s.okCount} sur ${s.total}${bad ? ' · à surveiller : ' + bad : ''}</dd>` +
+      (enough ? `<dt>Accordage du piano</dt><dd>${tuningText(s.tuning)}</dd>` : '') +
+      `<dt>Volume du piano</dt><dd>${s.weak ? 'faible par rapport au bruit de la pièce : rapprochez la tablette ou jouez plus fort' : 'bon'}</dd>`;
+    if (enough) calButton('Jouer !', '', () => endCalibration(true));
+    calButton('Refaire le calibrage', enough ? 'ghost' : '', () => startCalibration(cal.after));
+    if (!enough) calButton('Jouer quand même', 'ghost', () => endCalibration(false));
+    const rb = calButton('Copier le rapport pour Claude', 'ghost small', () => copyReport(rb, $('#calReport'), S.summary));
+  }
+}
+function reportText(summary){
+  const c = summary || settings.calib;
+  const noteName = m => PC_NAME[mod(m, 12)] + (Math.floor(m / 12) - 1);
+  return JSON.stringify({
+    app:'note-a-note', date:new Date().toISOString(), appareil:navigator.userAgent,
+    frequenceEchantillonnage: audio.ctx ? audio.ctx.sampleRate : null,
+    sensibilite: settings.sensitivity, autreOctaveAcceptee: settings.anyOctave,
+    accordageMesureEnDirect: mic.listener ? Math.round(mic.listener.tuning * 100) : null,
+    calibrage: c ? {
+      seuil: +(+c.gate).toFixed(5), bruit: +(+c.noise).toFixed(5), volumeMin: +(+c.minLevel).toFixed(5),
+      accordageCentiemes: Math.round(c.tuning * 100),
+      notes: (c.notes || []).map(n => ({ note:noteName(n.midi), volume:+(+n.level).toFixed(4), entendue:Math.round(n.agree * 100) + '%',
+        ok:n.ok, entenduCommme: n.heard === null || n.heard === undefined ? null : PC_NAME[n.heard] }))
+    } : null
+  }, null, 1);
+}
+async function copyReport(btn, box, summary){
+  const txt = reportText(summary);
+  try { await navigator.clipboard.writeText(txt); btn.textContent = 'Rapport copié'; }
+  catch(e){ box.hidden = false; box.value = txt; box.focus(); box.select(); btn.textContent = 'Sélectionnez le texte et copiez-le'; }
 }
 
 /* ---------- Clavier à l'écran ---------- */
@@ -639,7 +860,7 @@ function weightedPick(cands){
 }
 let wrongTimer = 0;
 const game = {
-  round:null, busy:false, started:false,
+  round:null, busy:false, started:false, lastCorrectAt:0,
   newRound(){
     const L = progress.level, rg = RANGES[settings.range] || RANGES.octave;
     const pool = []; for (let d = rg.lo; d <= rg.hi; d++) pool.push(d);
@@ -656,8 +877,10 @@ const game = {
   },
   matches(midi, d){ const t = dToMidi(d); return settings.anyOctave ? mod(midi - t, 12) === 0 : midi === t; },
   framesNeeded(midi){
-    const r = this.round; if (!r || r.done || this.busy || !this.started) return 99;
-    return this.matches(midi, r.targets[r.idx]) ? 3 : 6;
+    const r = this.round; if (!r || r.done || this.busy || !this.started || midi < 48) return 99;
+    if (this.matches(midi, r.targets[r.idx])) return 3;
+    // Juste après une bonne note, ce qu'on entend est souvent la fin de cette note : pas d'erreur
+    return performance.now() - this.lastCorrectAt < 350 ? 99 : 6;
   },
   onNote(midi){
     const r = this.round;
@@ -666,6 +889,7 @@ const game = {
     stats[d] = stats[d] || { a:0, e:0 };
     if (this.matches(midi, d)){
       stats[d].a++;
+      this.lastCorrectAt = performance.now();
       flashKey(midi, 'good');
       r.idx++; r.wrongHere = 0;
       if (r.idx >= r.targets.length) return this.complete();
@@ -746,6 +970,11 @@ function openSettings(){
   $('#sSens').value = settings.sensitivity; $('#sSound').checked = settings.sound;
   renderStats();
   $('#diagOff').hidden = !!mic.running; $('#diagOn').hidden = !mic.running;
+  const c = settings.calib;
+  $('#calStatus').textContent = c
+    ? `Calibrage fait le ${new Date(c.at).toLocaleDateString('fr-FR', { day:'numeric', month:'long' })} : ${c.okCount} notes sur ${c.total} bien entendues, piano ${tuningText(c.tuning).replace(', compensé automatiquement', '')}.`
+    : "Calibrage pas encore fait.";
+  $('#setReport').hidden = true; $('#reportBtn').textContent = 'Copier le rapport pour Claude';
   const rb = $('#resetBtn'); rb.classList.remove('armed'); rb.textContent = 'Tout remettre à zéro';
   $('#settings').hidden = false; $('#sSens').focus();
 }
@@ -785,6 +1014,12 @@ $('#resetBtn').addEventListener('click', e => {
   $('#settings').hidden = true; game.newRound();
 });
 $('#setBtn').addEventListener('click', openSettings);
+$('#recalBtn').addEventListener('click', () => {
+  $('#settings').hidden = true;
+  game.started = false;
+  startCalibration(() => { game.started = true; if (mic.listener) mic.listener.reset(); game.newRound(); });
+});
+$('#reportBtn').addEventListener('click', e => copyReport(e.currentTarget, $('#setReport')));
 $('#homeSetBtn').addEventListener('click', openSettings);
 $('#skipBtn').addEventListener('click', () => { if (!game.busy) game.newRound(); });
 document.addEventListener('keydown', e => {
@@ -825,10 +1060,9 @@ $('#startBtn').addEventListener('click', async () => {
   }
   b.disabled = false;
   $('#home').hidden = true;
-  game.started = true;
-  if (mic.listener) mic.listener.reset();
   keepAwake();
-  game.newRound();
+  const go = () => { game.started = true; if (mic.listener) mic.listener.reset(); game.newRound(); };
+  if (src === 'mic' && !settings.calib) startCalibration(go); else go();
 });
 
 buildKeyboard();
