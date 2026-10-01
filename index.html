@@ -163,6 +163,16 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 .stats th,.stats td{text-align:left;padding:5px 6px;border-bottom:1px solid var(--line)}
 .stats td.n{text-align:right}
 .stats-wrap{overflow-x:auto}
+.diag{background:var(--bg);border-radius:14px;padding:14px 16px;display:grid;gap:8px}
+.diag #diagOn{display:grid;gap:10px}
+.dmeter{position:relative;height:14px;border-radius:99px;background:var(--line);overflow:hidden}
+.dmeter i{position:absolute;left:0;top:0;bottom:0;width:0;background:var(--good);border-radius:99px}
+.dmeter b{position:absolute;top:-2px;bottom:-2px;width:3px;background:var(--ink)}
+.diag dl{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0;font-size:.95rem}
+.diag dt{color:var(--muted)}
+.diag dd{margin:0;font-weight:700;min-width:0}
+.diag .ok{color:var(--good)}
+.diag .ko{color:var(--bad)}
 .big-star{width:84px;height:84px;justify-self:center}
 .big-star path{fill:var(--star)}
 .celebrate{text-align:center;justify-items:center}
@@ -245,6 +255,24 @@ input[type=range]{width:100%;accent-color:var(--accent)}
   <div class="panel" role="dialog" aria-modal="true" aria-labelledby="setTitle">
     <h2 id="setTitle">Réglages</h2>
     <form class="form" id="setForm">
+      <div class="diag" id="diag">
+        <h3>Test du micro</h3>
+        <p class="small" id="diagOff">Le micro n'est pas encore activé : fermez les réglages et touchez « Commencer » avec l'option Micro.</p>
+        <div id="diagOn" hidden>
+          <p class="small">Jouez une note au piano : la barre doit dépasser le trait et la note doit s'afficher.</p>
+          <div class="dmeter"><i id="dBar"></i><b id="dGate"></b></div>
+          <dl>
+            <dt>Volume</dt><dd id="dVol">…</dd>
+            <dt>Note entendue</dt><dd id="dNote">…</dd>
+            <dt>Accordage du piano</dt><dd id="dTune">…</dd>
+          </dl>
+        </div>
+      </div>
+      <div class="field">
+        <label for="sSens">Sensibilité du micro</label>
+        <input type="range" id="sSens" min="0" max="1" step="0.05">
+        <span class="small">Si l'appli n'entend rien, montez. Si elle entend des notes qui n'ont pas été jouées, baissez.</span>
+      </div>
       <div class="field">
         <label for="sName">Prénom</label>
         <input type="text" id="sName" maxlength="20" autocomplete="off">
@@ -265,11 +293,6 @@ input[type=range]{width:100%;accent-color:var(--accent)}
       <div class="field">
         <label for="sLevel">Niveau actuel</label>
         <select id="sLevel"><option value="1">1 · une note</option><option value="2">2 · deux notes</option><option value="3">3 · trois notes</option><option value="4">4 · quatre notes</option><option value="5">5 · cinq notes</option></select>
-      </div>
-      <div class="field">
-        <label for="sSens">Sensibilité du micro</label>
-        <input type="range" id="sSens" min="0" max="1" step="0.05">
-        <span class="small">Si l'appli entend des notes qui n'ont pas été jouées, baissez. Si elle n'entend rien, montez. La barre verte en bas de l'écran doit dépasser le trait quand une note est jouée.</span>
       </div>
       <label class="check"><input type="checkbox" id="sSound"><span>Petite musique de réussite</span></label>
       <div class="field">
@@ -322,9 +345,9 @@ let progress = Object.assign({ level:1, stars:0 }, store.get('progress', {}));
 let stats = store.get('stats', {});
 const saveAll = () => { store.set('settings', settings); store.set('progress', progress); store.set('stats', stats); };
 
-/* ---------- Détection de hauteur (YIN) ---------- */
+/* ---------- Écoute : hauteur (YIN), une frappe = un événement, accordage du piano ---------- */
 function detectPitch(buf, sr, d){
-  const minF = 70, maxF = 1400, thr = 0.15;
+  const minF = 70, maxF = 1400, thr = 0.2, fallback = 0.35;
   const maxTau = Math.min(Math.floor(sr / minF), buf.length >> 1);
   const minTau = Math.max(2, Math.floor(sr / maxF));
   const W = buf.length - maxTau;
@@ -340,37 +363,78 @@ function detectPitch(buf, sr, d){
   for (let t = minTau; t < maxTau; t++){
     if (d[t] < thr){ while (t + 1 < maxTau && d[t + 1] < d[t]) t++; tau = t; break; }
   }
+  if (tau < 0){
+    // Son moins net (écho, bruit) : on garde le meilleur creux s'il reste convaincant
+    let best = fallback;
+    for (let t = minTau; t < maxTau; t++) if (d[t] < best){ best = d[t]; tau = t; }
+  }
   if (tau < 1) return null;
   const a = d[tau - 1], b = d[tau], c = d[tau + 1];
   const den = a + c - 2 * b;
   const shift = den !== 0 ? Math.max(-1, Math.min(1, (a - c) / (2 * den))) : 0;
   return { freq: sr / (tau + shift), clarity: 1 - b };
 }
-function freqToMidi(f){
-  const m = 69 + 12 * Math.log2(f / 440);
-  const r = Math.round(m);
-  return (Math.abs(m - r) < 0.4 && r >= 36 && r <= 96) ? r : null;
-}
 
-/* ---------- Tri des notes entendues : une frappe = un événement ---------- */
-const gate = {
-  last:null, armed:true, cand:null, count:0, recent:[], wasOnset:false,
-  update(midi, rms, level, muted){
-    this.recent.push(rms); if (this.recent.length > 6) this.recent.shift();
-    if (rms < level * 0.7){ this.armed = true; this.cand = null; this.count = 0; this.wasOnset = false; return; }
-    const minR = Math.min.apply(null, this.recent);
-    const onset = this.recent.length >= 4 && rms > minR * 1.8;
-    if (onset && !this.wasOnset){ this.armed = true; this.cand = null; this.count = 0; }
-    this.wasOnset = onset;
-    if (midi === null){ this.cand = null; this.count = 0; return; }
-    if (midi === this.cand) this.count++; else { this.cand = midi; this.count = 1; }
-    if (muted) return;
-    if (this.count === game.framesNeeded(midi) && (this.armed || midi !== this.last)){
-      this.last = midi; this.armed = false;
-      game.onNote(midi);
+// o = { sr, gateFor(), framesNeeded(midi), onNote(midi), tuning }
+function createListener(o){
+  const d = new Float32Array(Math.floor(o.sr / 70) + 2);
+  const t0 = o.tuning || 0;
+  const st = { noise:null, recent:[], hist:[], fired:new Set(), wasOnset:false,
+               ts:Math.sin(2 * Math.PI * t0), tc:Math.cos(2 * Math.PI * t0), tn:t0 ? 40 : 0 };
+  // Décalage d'accordage du piano, en demi-tons (moyenne circulaire des écarts mesurés)
+  const offset = () => st.tn < 6 ? 0 : Math.atan2(st.ts, st.tc) / (2 * Math.PI);
+  const reset = () => { st.hist = []; st.fired.clear(); };
+  return {
+    get tuning(){ return offset(); },
+    get learned(){ return st.tn; },
+    reset,
+    process(buf, muted){
+      let s = 0; for (let i = 0; i < buf.length; i++) s += buf[i] * buf[i];
+      const rms = Math.sqrt(s / buf.length);
+      const userGate = o.gateFor();
+      if (st.noise === null) st.noise = rms;
+      const gate = Math.max(userGate, Math.min(st.noise * 2.5, userGate * 6));
+      const info = { rms, gate, freq:null, midi:null, cents:null };
+      st.recent.push(rms); if (st.recent.length > 6) st.recent.shift();
+      if (muted){ st.hist = []; return info; }
+      if (rms < gate * 0.7){
+        reset(); st.wasOnset = false;
+        st.noise = rms < st.noise ? st.noise * 0.8 + rms * 0.2 : st.noise * 1.002;
+        return info;
+      }
+      const minR = Math.min.apply(null, st.recent);
+      const onset = st.recent.length >= 4 && rms > minR * 1.8;
+      if (onset && !st.wasOnset) reset();
+      st.wasOnset = onset;
+      let midi = null;
+      if (rms > gate){
+        const p = detectPitch(buf, o.sr, d);
+        if (p){
+          const m = 69 + 12 * Math.log2(p.freq / 440);
+          info.freq = p.freq;
+          if (p.clarity > 0.8){
+            const ph = 2 * Math.PI * (m - Math.round(m)), a = Math.max(0.02, 1 / (st.tn + 1));
+            st.ts += a * (Math.sin(ph) - st.ts); st.tc += a * (Math.cos(ph) - st.tc); st.tn++;
+          }
+          const mc = m - offset(), r = Math.round(mc);
+          if (Math.abs(mc - r) < 0.42 && r >= 36 && r <= 96){ midi = r; info.cents = Math.round((mc - r) * 100); }
+        } else {
+          st.noise = rms < st.noise ? st.noise * 0.8 + rms * 0.2 : st.noise * 1.002;
+        }
+      }
+      info.midi = midi;
+      st.hist.push(midi); if (st.hist.length > 7) st.hist.shift();
+      // Une note déjà validée depuis la dernière frappe ne compte plus, même si l'écho bascule d'octave
+      if (midi !== null && !st.fired.has(midi % 12)){
+        const need = o.framesNeeded(midi), win = need <= 3 ? 5 : 7;
+        let votes = 0; for (const x of st.hist.slice(-win)) if (x === midi) votes++;
+        if (votes >= need){ st.fired.add(midi % 12); o.onNote(midi); }
+      }
+      return info;
     }
-  }
-};
+  };
+}
+const gateFor = () => Math.pow(10, -2 - 1.5 * settings.sensitivity);
 
 /* ---------- Sons ---------- */
 const audio = {
@@ -414,44 +478,67 @@ const audio = {
 
 /* ---------- Micro ---------- */
 const mic = {
-  analyser:null, buf:null, d:null, running:false, sr:44100, lastText:0,
+  analyser:null, buf:null, listener:null, running:false, lastText:0, frames:0, savedTuning:null,
   async start(){
     const ctx = audio.ensure();
     if (!ctx || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('unsupported');
     const stream = await navigator.mediaDevices.getUserMedia({ audio:{ echoCancellation:false, noiseSuppression:false, autoGainControl:false } });
+    if (ctx.state !== 'running') { try { await ctx.resume(); } catch(e){} }
     const src = ctx.createMediaStreamSource(stream);
     this.analyser = ctx.createAnalyser();
     this.analyser.fftSize = 2048;
     src.connect(this.analyser);
-    this.sr = ctx.sampleRate;
+    // Safari ne fait circuler le son que si la chaîne aboutit aux haut-parleurs : on la relie, à volume nul
+    const silent = ctx.createGain(); silent.gain.value = 0;
+    this.analyser.connect(silent); silent.connect(ctx.destination);
     this.buf = new Float32Array(this.analyser.fftSize);
-    this.d = new Float32Array(Math.floor(this.sr / 70) + 2);
+    this.savedTuning = store.get('tuning', 0);
+    this.listener = createListener({
+      sr: ctx.sampleRate, gateFor, tuning: this.savedTuning,
+      framesNeeded: m => game.framesNeeded(m), onNote: m => game.onNote(m)
+    });
     this.running = true;
     requestAnimationFrame(() => this.tick());
   },
   tick(){
     if (!this.running) return;
+    if (audio.ctx && audio.ctx.state !== 'running') audio.ctx.resume();
     this.analyser.getFloatTimeDomainData(this.buf);
-    let s = 0; for (let i = 0; i < this.buf.length; i++) s += this.buf[i] * this.buf[i];
-    const rms = Math.sqrt(s / this.buf.length);
-    const level = Math.pow(10, -1 - 2 * settings.sensitivity);
-    let midi = null;
-    if (rms > level){ const p = detectPitch(this.buf, this.sr, this.d); if (p) midi = freqToMidi(p.freq); }
-    gate.update(midi, rms, level, performance.now() < audio.muteUntil);
-    this.meter(rms, level, midi);
+    const info = this.listener.process(this.buf, performance.now() < audio.muteUntil);
+    if (++this.frames % 120 === 0 && this.listener.learned > 20){
+      const tu = Math.round(this.listener.tuning * 100) / 100;
+      if (tu !== this.savedTuning){ this.savedTuning = tu; store.set('tuning', tu); }
+    }
+    this.meter(info);
     requestAnimationFrame(() => this.tick());
   },
-  meter(rms, level, midi){
-    const pos = v => Math.max(0, Math.min(1, (Math.log10(Math.max(v, 1e-4)) + 3.2) / 2.8)) * 100;
-    $('#meterBar').style.width = pos(rms) + '%';
-    $('#meterGate').style.left = pos(level) + '%';
+  meter(info){
+    const pos = v => Math.max(0, Math.min(1, (Math.log10(Math.max(v, 1e-4)) + 4) / 3.5)) * 100;
+    $('#meterBar').style.width = pos(info.rms) + '%';
+    $('#meterGate').style.left = pos(info.gate) + '%';
+    if (info.midi !== null) this.lastNote = { midi:info.midi, freq:info.freq, cents:info.cents, at:performance.now() };
     const now = performance.now();
-    if (now - this.lastText > 180){
-      this.lastText = now;
-      $('#micText').textContent = (midi !== null && gate.count >= 2) ? "J'entends : " + PC_NAME[mod(midi, 12)] : "J'écoute…";
-    }
+    if (now - this.lastText < 150) return;
+    this.lastText = now;
+    const recent = this.lastNote && now - this.lastNote.at < 400 ? this.lastNote : null;
+    $('#micText').textContent = recent ? "J'entends : " + PC_NAME[mod(recent.midi, 12)] : "J'écoute…";
+    if (!$('#settings').hidden) renderDiag(info, recent);
   }
 };
+function renderDiag(info, recent){
+  const pos = v => Math.max(0, Math.min(1, (Math.log10(Math.max(v, 1e-4)) + 4) / 3.5)) * 100;
+  $('#dBar').style.width = pos(info.rms) + '%';
+  $('#dGate').style.left = pos(info.gate) + '%';
+  $('#dVol').textContent = info.rms > info.gate ? 'assez fort' : 'trop faible';
+  $('#dVol').className = info.rms > info.gate ? 'ok' : 'ko';
+  $('#dNote').textContent = recent
+    ? `${PC_NAME[mod(recent.midi, 12)]} (${Math.round(recent.freq)} Hz)`
+    : (info.rms > info.gate ? 'son sans note nette' : 'aucune');
+  const c = Math.round(mic.listener.tuning * 100);
+  $('#dTune').textContent = mic.listener.learned < 6 ? 'jouez quelques notes pour le mesurer'
+    : Math.abs(c) < 6 ? 'juste'
+    : `${Math.abs(c)} centièmes de demi-ton ${c < 0 ? 'trop bas' : 'trop haut'}, compensé automatiquement`;
+}
 
 /* ---------- MIDI ---------- */
 async function startMidi(){
@@ -658,8 +745,9 @@ function openSettings(){
   $('#sPass').value = String(settings.toPass); $('#sNames').value = settings.names; $('#sLevel').value = String(progress.level);
   $('#sSens').value = settings.sensitivity; $('#sSound').checked = settings.sound;
   renderStats();
+  $('#diagOff').hidden = !!mic.running; $('#diagOn').hidden = !mic.running;
   const rb = $('#resetBtn'); rb.classList.remove('armed'); rb.textContent = 'Tout remettre à zéro';
-  $('#settings').hidden = false; $('#sName').focus();
+  $('#settings').hidden = false; $('#sSens').focus();
 }
 function renderStats(){
   const rows = Object.keys(stats).map(Number).filter(d => (stats[d].a + stats[d].e) > 0)
@@ -738,7 +826,7 @@ $('#startBtn').addEventListener('click', async () => {
   b.disabled = false;
   $('#home').hidden = true;
   game.started = true;
-  gate.last = null; gate.armed = true;
+  if (mic.listener) mic.listener.reset();
   keepAwake();
   game.newRound();
 });
