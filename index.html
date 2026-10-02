@@ -179,6 +179,11 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 .panel.wide{max-width:920px}
 .calbar{height:10px;border-radius:99px;background:var(--line);overflow:hidden}
 .calbar i{display:block;height:100%;width:0;background:var(--accent);border-radius:99px;transition:width .1s linear}
+.calear{display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px}
+.calear .dmeter{flex:1 1 140px;max-width:240px}
+#cHear{font-family:var(--f-display);font-weight:700;font-size:1.15rem;min-width:0}
+#cHear.exp{color:var(--good)}
+#cHear.none{color:var(--muted)}
 .calhint{margin:0;font-family:var(--f-display);font-weight:700;font-size:1.15rem;color:var(--bad)}
 .calsum{display:grid;grid-template-columns:auto 1fr;gap:6px 16px;margin:0;font-size:1rem}
 .calsum dt{color:var(--muted)}
@@ -257,6 +262,7 @@ input[type=range]{width:100%;accent-color:var(--accent)}
     <p class="lead" id="calText"></p>
     <div class="calbar" id="calBar"><i id="calProg"></i></div>
     <div class="sheet"><svg id="calStaff" class="staff" viewBox="0 0 760 252" role="img" aria-label="Gamme à jouer"></svg></div>
+    <div class="calear" id="calEar" hidden><span class="dmeter" aria-hidden="true"><i id="cBar"></i><b id="cGate"></b></span><span id="cHear" aria-live="polite">Je n'entends rien</span></div>
     <p class="calhint" id="calHint" aria-live="polite" hidden></p>
     <dl class="calsum" id="calSum" hidden></dl>
     <textarea class="report" id="calReport" readonly hidden aria-label="Rapport de calibrage"></textarea>
@@ -522,7 +528,8 @@ const gateFor = noise => {
 function quantile(a, q){ if (!a.length) return 0; const s = a.slice().sort((x, y) => x - y); return s[Math.min(s.length - 1, Math.round(q * (s.length - 1)))]; }
 function createCalibrator(notes, cb){
   const S = { phase:'silence', t0:null, silence:[], idx:0, tries:0, capturing:false, cap:[], skip:0, recent:[],
-              waitFrom:0, readyAt:0, results:[], devsAll:[], noise:0, noise90:0, hint:null, summary:null, progress:0 };
+              waitFrom:0, readyAt:0, results:[], devsAll:[], est:null, matchRun:0, live:null, liveAt:0,
+              noise:0, noise90:0, hint:null, summary:null, progress:0 };
   const CAP = 18;
   const wrap = x => x - 12 * Math.round(x / 12);
   function feed(info, now){
@@ -532,19 +539,44 @@ function createCalibrator(notes, cb){
       S.silence.push(info.rms);
       S.progress = Math.min(1, (now - S.t0) / 2000);
       if (S.progress >= 1){
-        S.noise = quantile(S.silence, 0.5); S.noise90 = Math.max(quantile(S.silence, 0.9), 1e-6);
-        S.phase = 'note'; S.waitFrom = now; S.readyAt = now;
+        const q10 = quantile(S.silence, 0.1), q90 = quantile(S.silence, 0.9);
+        // Un son pendant le silence (note jouée, voix) fausserait la mesure du bruit : on recommence, deux fois au plus
+        if (q90 > q10 * 2.5 && (S.silenceTries || 0) < 2){
+          S.silenceTries = (S.silenceTries || 0) + 1; S.silence = []; S.t0 = now; S.hint = 'noisy';
+          cb.onState(S); return;
+        }
+        S.noise = quantile(S.silence, 0.3); S.noise90 = Math.max(Math.min(q90, q10 * 2), 1e-6);
+        S.phase = 'note'; S.hint = null; S.waitFrom = now; S.readyAt = now;
         cb.onState(S);
       } else if (cb.onProgress) cb.onProgress(S.progress);
       return;
     }
-    const thr = S.noise90 * 3;
+    const thr = S.noise90 * 3, exp = notes[S.idx];
     S.recent.push(info.rms); if (S.recent.length > 5) S.recent.shift();
+    // Ce que l'appli entend, pour l'afficher en direct : rien, un son, la note attendue, une autre note
+    let kind = 'none', pc = null;
+    if (info.rms > thr){
+      if (info.mRaw === null) kind = 'sound';
+      else {
+        const dev = wrap(info.mRaw - exp);
+        const isExp = S.est === null ? Math.abs(dev) < 0.6 : Math.abs(dev - S.est) < 0.4;
+        kind = isExp ? 'expected' : 'other';
+        pc = isExp ? mod(exp, 12) : mod(Math.round(info.mRaw - (S.est || 0)), 12);
+      }
+    }
+    if (kind !== 'none'){ S.live = { kind, pc }; S.liveAt = now; }
+    else if (now - S.liveAt > 500) S.live = { kind:'none', pc:null };
+    S.matchRun = kind === 'expected' ? S.matchRun + 1 : 0;
     if (!S.capturing){
       const prevMin = Math.min.apply(null, S.recent.slice(0, -1));
-      if (now >= S.readyAt && info.rms > thr && S.recent.length >= 3 && info.rms > prevMin * 1.6){
-        S.capturing = true; S.cap = []; S.skip = 2;
-      } else if (!S.hint && now - S.waitFrom > 7000){ S.hint = 'quiet'; cb.onState(S); }
+      const attack = info.rms > thr && S.recent.length >= 3 && info.rms > prevMin * 1.6;
+      // On commence à écouter sur une attaque nette, ou dès que la note attendue est entendue
+      // (une note rejouée doucement pendant que la précédente sonne encore ne fait pas d'attaque nette)
+      if (now >= S.readyAt && (attack || S.matchRun >= 2)){
+        S.capturing = true; S.cap = []; S.skip = attack ? 2 : 0;
+      } else if (!S.hint && now - S.waitFrom > 7000){
+        S.hint = S.live && S.live.kind === 'other' ? 'other' : 'quiet'; S.hintPc = S.live ? S.live.pc : null; cb.onState(S);
+      }
       return;
     }
     if (S.skip > 0){ S.skip--; return; }
@@ -558,7 +590,7 @@ function createCalibrator(notes, cb){
     // Écart d'accordage attendu : celui des notes déjà validées (pour la première note, la note elle-même).
     // Une corde un peu plus fausse que les autres est ainsi reconnue, une autre touche ne l'est pas.
     let est;
-    if (S.devsAll.length) est = quantile(S.devsAll, 0.5);
+    if (S.est !== null) est = S.est;
     else { const near = raw.filter(x => Math.abs(x) < 0.6); est = near.length ? quantile(near, 0.5) : 0; }
     const devs = raw.filter(x => Math.abs(x - est) < 0.4);
     const hist = {};
@@ -569,24 +601,29 @@ function createCalibrator(notes, cb){
     res.ok = res.agree >= 0.5;
     return res;
   }
+  const addDevs = devs => { S.devsAll.push.apply(S.devsAll, devs); S.est = quantile(S.devsAll, 0.5); };
   function finishNote(now){
     S.capturing = false;
     const res = evaluate(notes[S.idx]);
+    if (!res.ok && S.idx > 0 && S.results[S.idx - 1] && S.results[S.idx - 1].ok && evaluate(notes[S.idx - 1]).ok){
+      // La note précédente, rejouée alors qu'elle était déjà validée : on l'ignore et on attend la suivante
+      S.readyAt = now + 200; return;
+    }
     if (!res.ok && S.idx + 1 < notes.length){
-      // L'enfant a continué la gamme sans rejouer la note manquée : on la note comme ratée et on suit
+      // Note attendue jamais entendue, et la suivante jouée : on note la première « pas entendue » et on suit
       const nxt = evaluate(notes[S.idx + 1]);
       if (nxt.ok){
-        res.cents = null; S.results[S.idx] = res;
-        S.devsAll.push.apply(S.devsAll, nxt.devs);
+        S.results[S.idx] = Object.assign(res, { missed:true, heard:null, cents:null, agree:0 });
+        addDevs(nxt.devs);
         S.idx++; S.results[S.idx] = nxt; next(now); return;
       }
     }
     if (!res.ok && S.tries === 0){ S.tries = 1; S.hint = 'retry'; S.waitFrom = now; S.readyAt = now + 300; cb.onState(S); return; }
-    if (res.ok) S.devsAll.push.apply(S.devsAll, res.devs);
+    if (res.ok) addDevs(res.devs);
     S.results[S.idx] = res; next(now);
   }
   function next(now){
-    S.idx++; S.tries = 0; S.hint = null; S.waitFrom = now; S.readyAt = now + 300; S.capturing = false;
+    S.idx++; S.tries = 0; S.hint = null; S.waitFrom = now; S.readyAt = now + 300; S.capturing = false; S.matchRun = 0;
     if (S.idx >= notes.length) return done();
     cb.onState(S);
   }
@@ -600,8 +637,9 @@ function createCalibrator(notes, cb){
       gate: hi > lo ? Math.sqrt(lo * hi) : lo,
       noise: S.noise, noise90: S.noise90, minLevel, weak: minLevel < S.noise90 * 8,
       okCount: ok.length, total: notes.length,
-      bad: S.results.filter(r => !r || !r.ok).map(r => ({ midi:r.midi, heard:r.heard })),
-      notes: S.results.map(r => ({ midi:r.midi, level:r.level, agree:r.agree, ok:!!r.ok, heard:r.heard, cents:r.cents }))
+      bad: S.results.filter(r => !r || !r.ok).map(r => ({ midi:r.midi, heard:r.heard, missed:!!r.missed, skipped:!!r.skipped })),
+      notes: S.results.map(r => ({ midi:r.midi, level:r.level, agree:r.agree, ok:!!r.ok, heard:r.heard, cents:r.cents,
+                                   missed:!!r.missed, skipped:!!r.skipped }))
     };
     cb.onState(S);
   }
@@ -727,8 +765,11 @@ const mic = {
     $('#meterBar').style.width = meterPos(info.rms, info.noise) + '%';
     $('#meterGate').style.left = meterPos(info.gate, info.noise) + '%';
     if (info.midi !== null) this.lastNote = { midi:info.midi, freq:info.freq, cents:info.cents, at:now };
+    const calOn = cal.run && cal.run.state.phase === 'note' && !$('#calib').hidden;
+    if (calOn) renderCalEar(info, false);
     if (now - this.lastText < 150) return;
     this.lastText = now;
+    if (calOn) renderCalEar(info, true);
     const recent = this.lastNote && now - this.lastNote.at < 400 ? this.lastNote : null;
     $('#micText').textContent = recent ? "J'entends : " + PC_NAME[mod(recent.midi, 12)] : "J'écoute…";
     if (!$('#settings').hidden) renderDiag(info, recent);
@@ -814,8 +855,10 @@ function renderStaff(opts = {}){
 /* ---------- Écran de calibrage ---------- */
 const cal = { run:null, ds:[], after:null };
 const CAL_HINT = {
-  quiet: "Je n'entends rien. Joue un peu plus fort, ou rapproche la tablette du piano.",
-  retry: "Je n'ai pas bien entendu. Rejoue la même note, bien appuyée."
+  quiet: () => "Je n'entends rien. Joue un peu plus fort, ou rapproche la tablette du piano.",
+  retry: () => "Je n'ai pas bien entendu. Rejoue la même note, bien appuyée.",
+  noisy: () => "J'entends encore du bruit. On recommence : chut !",
+  other: S => `J'entends un ${PC_NAME[S.hintPc]}, mais j'attends un ${dName(cal.ds[S.idx])}.`
 };
 function startCalibration(after){
   const rg = RANGES[settings.range] || RANGES.octave;
@@ -843,6 +886,18 @@ function endCalibration(save){
   $('#calib').hidden = true;
   if (cal.after) cal.after();
 }
+function renderCalEar(info, withText){
+  const S = cal.run.state;
+  $('#cBar').style.width = meterPos(info.rms, info.noise) + '%';
+  $('#cGate').style.left = meterPos(S.noise90 * 3, info.noise) + '%';
+  if (!withText) return;
+  const lv = S.live || { kind:'none', pc:null }, el = $('#cHear');
+  el.className = lv.kind === 'expected' ? 'exp' : lv.kind === 'none' ? 'none' : '';
+  el.textContent = lv.kind === 'expected' ? `J'entends : ${PC_NAME[lv.pc]} ✓`
+    : lv.kind === 'other' ? `J'entends : ${PC_NAME[lv.pc]}`
+    : lv.kind === 'sound' ? "J'entends un son, mais pas de note nette"
+    : "Je n'entends rien";
+}
 function calButton(label, kind, fn){
   const b = document.createElement('button'); b.type = 'button'; b.className = 'btn' + (kind ? ' ' + kind : '');
   b.textContent = label; b.onclick = fn; $('#calActions').appendChild(b); return b;
@@ -860,7 +915,8 @@ function renderCalib(S){
   }));
   $('#calActions').innerHTML = '';
   $('#calBar').hidden = S.phase !== 'silence';
-  $('#calHint').hidden = !S.hint; $('#calHint').textContent = S.hint ? CAL_HINT[S.hint] : '';
+  $('#calEar').hidden = S.phase !== 'note';
+  $('#calHint').hidden = !S.hint; $('#calHint').textContent = S.hint ? CAL_HINT[S.hint](S) : '';
   $('#calSum').hidden = S.phase !== 'done';
   if (S.phase === 'silence'){
     $('#calTitle').textContent = 'Calibrage du micro';
@@ -879,7 +935,8 @@ function renderCalib(S){
     $('#calText').textContent = enough
       ? "L'appli connaît maintenant le son de ton piano."
       : "Je n'ai pas assez bien entendu le piano pour me régler. Rapproche la tablette du piano et recommence.";
-    const bad = s.bad.map(b => PC_NAME[mod(b.midi, 12)] + (b.heard !== null && b.heard !== mod(b.midi, 12) ? ` (entendu ${PC_NAME[b.heard]})` : '')).join(', ');
+    const bad = s.bad.map(b => PC_NAME[mod(b.midi, 12)] + (b.skipped ? ' (passé)' : b.missed ? ' (pas entendu)'
+      : b.heard !== null && b.heard !== mod(b.midi, 12) ? ` (entendu ${PC_NAME[b.heard]})` : '')).join(', ');
     $('#calSum').innerHTML =
       `<dt>Notes bien entendues</dt><dd>${s.okCount} sur ${s.total}${bad ? ' · à surveiller : ' + bad : ''}</dd>` +
       (enough ? `<dt>Accordage du piano</dt><dd>${tuningText(s.tuning)}</dd>` : '') +
@@ -890,7 +947,7 @@ function renderCalib(S){
     const rb = calButton('Copier le rapport pour Claude', 'ghost small', () => copyReport(rb, $('#calReport'), S.summary));
   }
 }
-const APP_VERSION = '2026-10-02';
+const APP_VERSION = '2026-10-02b';
 function reportText(summary){
   const c = summary || settings.calib;
   const noteName = m => PC_NAME[mod(m, 12)] + (Math.floor(m / 12) - 1);
@@ -907,7 +964,8 @@ function reportText(summary){
       version: c.v || 1, seuil: n5(c.gate), bruit: n5(c.noise), bruit90: n5(c.noise90), volumeMin: n5(c.minLevel),
       accordageCentiemes: Math.round(c.tuning * 100),
       notes: (c.notes || []).map(n => ({ note:noteName(n.midi), volume:n5(n.level), entendue:Math.round(n.agree * 100) + '%',
-        ok:n.ok, entenduComme: n.heard === null || n.heard === undefined ? null : PC_NAME[n.heard],
+        ok:n.ok, etat: n.skipped ? 'passée' : n.missed ? 'pas entendue' : n.ok ? 'ok' : 'mal entendue',
+        entenduComme: n.heard === null || n.heard === undefined ? null : PC_NAME[n.heard],
         centiemes: n.cents === undefined ? null : n.cents }))
     } : null
   }, null, 1);
@@ -967,7 +1025,7 @@ const game = {
     const pool = []; for (let d = rg.lo; d <= rg.hi; d++) pool.push(d);
     const targets = [];
     for (let i = 0; i < L; i++){
-      const prev = targets[i - 1];
+      const prev = i ? targets[i - 1] : this.lastD;
       targets.push(weightedPick(pool.filter(d => prev === undefined || mod(d, 7) !== mod(prev, 7))));
     }
     this.round = { targets, idx:0, mistakes:0, wrongHere:0, done:false };
@@ -1009,6 +1067,7 @@ const game = {
   },
   complete(){
     const r = this.round; r.done = true; this.busy = true;
+    this.lastD = r.targets[r.targets.length - 1];
     const perfect = r.mistakes === 0;
     if (perfect) progress.stars++;
     store.set('progress', progress); store.set('stats', stats);
