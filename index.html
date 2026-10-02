@@ -405,34 +405,74 @@ function detectPitch(buf, sr, d){
   return { freq: sr / (tau + shift), clarity: 1 - b };
 }
 
-// o = { sr, gateFor(), framesNeeded(midi), onNote(midi), tuning }
+// Affinage de la hauteur sur le spectre, autour des trois premiers harmoniques. Quand la note
+// précédente sonne encore, YIN se laisse tirer vers elle (jusqu'à un demi-ton) ; les pics du spectre, non.
+function createRefiner(N, sr){
+  const hann = new Float32Array(N), wb = new Float32Array(N);
+  for (let n = 0; n < N; n++) hann[n] = 0.5 - 0.5 * Math.cos(2 * Math.PI * n / (N - 1));
+  const power = f => {   // Goertzel : puissance du spectre à la fréquence f
+    const c = 2 * Math.cos(2 * Math.PI * f / sr); let s1 = 0, s2 = 0;
+    for (let n = 0; n < N; n++){ const s = wb[n] + c * s1 - s2; s2 = s1; s1 = s; }
+    return s1 * s1 + s2 * s2 - c * s1 * s2;
+  };
+  const mags = new Float64Array(25);
+  return (buf, f0) => {
+    if (buf.length !== N) return f0;
+    for (let n = 0; n < N; n++) wb[n] = buf[n] * hann[n];
+    let num = 0, den = 0;
+    for (let k = 1; k <= 3; k++){
+      const fc = f0 * k; if (fc > sr / 2.5) break;
+      let bi = 0;
+      for (let s = 0; s < 25; s++){ mags[s] = power(fc * Math.pow(2, (s - 12) * 5 / 1200)) + 1e-30; if (mags[s] > mags[bi]) bi = s; }
+      if (bi <= 0 || bi >= 24) continue;
+      const a = Math.log(mags[bi - 1]), b = Math.log(mags[bi]), c = Math.log(mags[bi + 1]);
+      const cents = ((bi - 12) + (a - c) / (2 * (a - 2 * b + c))) * 5, w = Math.sqrt(mags[bi]) * k;
+      num += w * cents; den += w;
+    }
+    return den > 0 ? f0 * Math.pow(2, num / den / 1200) : f0;
+  };
+}
+
+// o = { sr, gateFor(bruit), framesNeeded(midi), onNote(midi), anchor (accordage calibré) ou tuning (valeur de départ) }
 function createListener(o){
   const d = new Float32Array(Math.floor(o.sr / 120) + 2);
+  const refine = createRefiner(2048, o.sr);
   const t0 = o.tuning || 0;
   const st = { noise:null, recent:[], hist:[], fired:new Set(), wasOnset:false, peak:0,
+               anchor: typeof o.anchor === 'number' ? o.anchor : null, drift:0, dn:0,
                ts:Math.sin(2 * Math.PI * t0), tc:Math.cos(2 * Math.PI * t0), tn:t0 ? 40 : 0 };
-  // Décalage d'accordage du piano, en demi-tons (moyenne circulaire des écarts mesurés)
-  const offset = () => st.tn < 6 ? 0 : Math.atan2(st.ts, st.tc) / (2 * Math.PI);
+  const clamp = (v, a) => Math.max(-a, Math.min(a, v));
+  // Accordage du piano, en demi-tons. Après calibrage, il reste ancré sur la valeur mesurée (seule une
+  // petite dérive est suivie) : un piano presque un quart de ton trop haut ne peut plus faire basculer
+  // toutes les notes d'un demi-ton. Sans calibrage : moyenne circulaire des écarts entendus.
+  const offset = () => st.anchor !== null ? st.anchor + clamp(st.drift, 0.12)
+    : (st.tn < 6 ? 0 : Math.atan2(st.ts, st.tc) / (2 * Math.PI));
+  const learn = m => {
+    if (st.anchor !== null){
+      const x = m - st.anchor, e = x - Math.round(x);
+      if (Math.abs(e) < 0.3){ st.drift += (e - st.drift) / (st.dn + 60); if (st.dn < 600) st.dn++; }
+    } else {
+      const ph = 2 * Math.PI * (m - Math.round(m)), a = Math.max(0.02, 1 / (st.tn + 1));
+      st.ts += a * (Math.sin(ph) - st.ts); st.tc += a * (Math.cos(ph) - st.tc); st.tn++;
+    }
+  };
+  const trackNoise = rms => { st.noise = Math.max(1e-7, rms < st.noise ? st.noise * 0.8 + rms * 0.2 : st.noise * 1.005); };
   const reset = () => { st.hist = []; st.fired.clear(); st.peak = 0; };
   return {
     get tuning(){ return offset(); },
-    get learned(){ return st.tn; },
-    setTuning(v){ st.ts = Math.sin(2 * Math.PI * v); st.tc = Math.cos(2 * Math.PI * v); st.tn = 200; },
+    get anchored(){ return st.anchor !== null; },
+    get learned(){ return st.anchor !== null ? 999 : st.tn; },
+    setAnchor(v){ st.anchor = v; st.drift = 0; st.dn = 0; },
     reset,
     process(buf, muted){
       let s = 0; for (let i = 0; i < buf.length; i++) s += buf[i] * buf[i];
       const rms = Math.sqrt(s / buf.length);
-      const userGate = o.gateFor();
-      if (st.noise === null) st.noise = rms;
-      const gate = Math.max(userGate, Math.min(st.noise * 2.5, userGate * 6));
-      const info = { rms, gate, freq:null, midi:null, cents:null, mRaw:null, clarity:0 };
+      if (st.noise === null) st.noise = Math.max(rms, 1e-7);
+      const gate = o.gateFor(st.noise);
+      const info = { rms, gate, noise:st.noise, freq:null, midi:null, cents:null, mc:null, mRaw:null, clarity:0 };
       st.recent.push(rms); if (st.recent.length > 6) st.recent.shift();
       if (muted){ st.hist = []; return info; }
-      if (rms < gate * 0.7){
-        reset(); st.wasOnset = false;
-        st.noise = rms < st.noise ? st.noise * 0.8 + rms * 0.2 : st.noise * 1.002;
-        return info;
-      }
+      if (rms < gate * 0.7){ reset(); st.wasOnset = false; trackNoise(rms); return info; }
       const minR = Math.min.apply(null, st.recent);
       const onset = st.recent.length >= 4 && rms > minR * 1.8;
       if (onset && !st.wasOnset) reset();
@@ -442,17 +482,14 @@ function createListener(o){
       if (rms > gate){
         const p = detectPitch(buf, o.sr, d);
         if (p){
+          p.freq = refine(buf, p.freq);
           const m = 69 + 12 * Math.log2(p.freq / 440);
           info.freq = p.freq; info.mRaw = m; info.clarity = p.clarity;
-          if (p.clarity > 0.8){
-            const ph = 2 * Math.PI * (m - Math.round(m)), a = Math.max(0.02, 1 / (st.tn + 1));
-            st.ts += a * (Math.sin(ph) - st.ts); st.tc += a * (Math.cos(ph) - st.tc); st.tn++;
-          }
+          if (p.clarity > 0.8) learn(m);
           const mc = m - offset(), r = Math.round(mc);
-          if (Math.abs(mc - r) < 0.42 && r >= 36 && r <= 96){ midi = r; info.mc = mc; info.cents = Math.round((mc - r) * 100); }
-        } else {
-          st.noise = rms < st.noise ? st.noise * 0.8 + rms * 0.2 : st.noise * 1.002;
-        }
+          const tol = (st.anchor !== null || st.tn >= 6) ? 0.42 : 0.5;
+          if (Math.abs(mc - r) < tol && r >= 36 && r <= 96){ midi = r; info.mc = mc; info.cents = Math.round((mc - r) * 100); }
+        } else trackNoise(rms);
       }
       info.midi = midi;
       st.hist.push(midi === null ? null : { midi, mc:info.mc }); if (st.hist.length > 7) st.hist.shift();
@@ -470,19 +507,24 @@ function createListener(o){
     }
   };
 }
-const gateFor = () => {
-  // Pendant le calibrage, on écoute tout ce qui dépasse le bruit de la pièce
-  if (typeof cal !== 'undefined' && cal.run && cal.run.state.phase !== 'done') return 0.0003;
-  const base = settings.calib && settings.calib.gate ? settings.calib.gate : Math.pow(10, -2.75);
-  return base * Math.pow(10, (0.5 - settings.sensitivity) * 1.6);
+// Seuils relatifs au bruit mesuré (les micros de tablette donnent des niveaux très différents d'un appareil à l'autre)
+const CALIB_VERSION = 3;
+const calibOk = () => !!(settings.calib && settings.calib.v === CALIB_VERSION);
+const gateFor = noise => {
+  if (typeof cal !== 'undefined' && cal.run && cal.run.state.phase !== 'done')
+    return Math.max(2e-6, (cal.run.state.noise90 || noise) * 2);
+  const k = Math.pow(4, 1 - 2 * settings.sensitivity);   // sensibilité : seuil x4 (au minimum) à /4 (au maximum)
+  const base = calibOk() ? settings.calib.gate : noise * 4;
+  return Math.max(2e-6, base * k, noise * 1.8);
 };
 
 /* ---------- Calibrage : silence, puis gamme depuis le Do du milieu ---------- */
 function quantile(a, q){ if (!a.length) return 0; const s = a.slice().sort((x, y) => x - y); return s[Math.min(s.length - 1, Math.round(q * (s.length - 1)))]; }
 function createCalibrator(notes, cb){
   const S = { phase:'silence', t0:null, silence:[], idx:0, tries:0, capturing:false, cap:[], skip:0, recent:[],
-              waitFrom:0, readyAt:0, results:[], noise:0, noise90:0, hint:null, summary:null, progress:0 };
+              waitFrom:0, readyAt:0, results:[], devsAll:[], noise:0, noise90:0, hint:null, summary:null, progress:0 };
   const CAP = 18;
+  const wrap = x => x - 12 * Math.round(x / 12);
   function feed(info, now){
     if (S.phase === 'done') return;
     if (S.t0 === null) S.t0 = now;
@@ -490,13 +532,13 @@ function createCalibrator(notes, cb){
       S.silence.push(info.rms);
       S.progress = Math.min(1, (now - S.t0) / 2000);
       if (S.progress >= 1){
-        S.noise = quantile(S.silence, 0.5); S.noise90 = quantile(S.silence, 0.9);
+        S.noise = quantile(S.silence, 0.5); S.noise90 = Math.max(quantile(S.silence, 0.9), 1e-6);
         S.phase = 'note'; S.waitFrom = now; S.readyAt = now;
         cb.onState(S);
       } else if (cb.onProgress) cb.onProgress(S.progress);
       return;
     }
-    const thr = Math.max(S.noise90 * 3, 0.0004);
+    const thr = S.noise90 * 3;
     S.recent.push(info.rms); if (S.recent.length > 5) S.recent.shift();
     if (!S.capturing){
       const prevMin = Math.min.apply(null, S.recent.slice(0, -1));
@@ -510,17 +552,37 @@ function createCalibrator(notes, cb){
     if (info.rms < thr * 0.6 && S.cap.length < 8){ S.capturing = false; return; }
     if (S.cap.length >= CAP) finishNote(now);
   }
-  function finishNote(now){
-    S.capturing = false;
-    const exp = notes[S.idx], devs = [];
-    S.cap.forEach(c => { if (c.m === null) return; let x = c.m - exp; x -= 12 * Math.round(x / 12); if (Math.abs(x) < 0.6) devs.push(x); });
-    const off = devs.length ? quantile(devs, 0.5) : 0, hist = {};
-    S.cap.forEach(c => { if (c.m !== null){ const pc = mod(Math.round(c.m - off), 12); hist[pc] = (hist[pc] || 0) + 1; } });
+  // Évalue une prise de son par rapport à la note attendue `exp`
+  function evaluate(exp){
+    const raw = S.cap.filter(c => c.m !== null).map(c => wrap(c.m - exp));
+    // Écart d'accordage attendu : celui des notes déjà validées (pour la première note, la note elle-même).
+    // Une corde un peu plus fausse que les autres est ainsi reconnue, une autre touche ne l'est pas.
+    let est;
+    if (S.devsAll.length) est = quantile(S.devsAll, 0.5);
+    else { const near = raw.filter(x => Math.abs(x) < 0.6); est = near.length ? quantile(near, 0.5) : 0; }
+    const devs = raw.filter(x => Math.abs(x - est) < 0.4);
+    const hist = {};
+    S.cap.forEach(c => { if (c.m !== null){ const pc = mod(Math.round(c.m - est), 12); hist[pc] = (hist[pc] || 0) + 1; } });
     const top = Object.keys(hist).sort((a, b) => hist[b] - hist[a])[0];
     const res = { midi:exp, level:quantile(S.cap.map(c => c.rms), 0.5), agree:devs.length / S.cap.length, devs,
-                  heard:top === undefined ? null : +top };
+                  heard:top === undefined ? null : +top, cents:devs.length ? Math.round(quantile(devs, 0.5) * 100) : null };
     res.ok = res.agree >= 0.5;
+    return res;
+  }
+  function finishNote(now){
+    S.capturing = false;
+    const res = evaluate(notes[S.idx]);
+    if (!res.ok && S.idx + 1 < notes.length){
+      // L'enfant a continué la gamme sans rejouer la note manquée : on la note comme ratée et on suit
+      const nxt = evaluate(notes[S.idx + 1]);
+      if (nxt.ok){
+        res.cents = null; S.results[S.idx] = res;
+        S.devsAll.push.apply(S.devsAll, nxt.devs);
+        S.idx++; S.results[S.idx] = nxt; next(now); return;
+      }
+    }
     if (!res.ok && S.tries === 0){ S.tries = 1; S.hint = 'retry'; S.waitFrom = now; S.readyAt = now + 300; cb.onState(S); return; }
+    if (res.ok) S.devsAll.push.apply(S.devsAll, res.devs);
     S.results[S.idx] = res; next(now);
   }
   function next(now){
@@ -531,22 +593,21 @@ function createCalibrator(notes, cb){
   function done(){
     S.phase = 'done';
     const ok = S.results.filter(r => r && r.ok);
-    const devs = [].concat.apply([], ok.map(r => r.devs));
     const minLevel = ok.length ? Math.min.apply(null, ok.map(r => r.level)) : 0;
-    const lo = Math.max(S.noise90 * 2.5, 0.0003), hi = minLevel * 0.3;
+    const lo = Math.max(S.noise90 * 2.5, 2e-6), hi = minLevel * 0.3;
     S.summary = {
-      tuning: devs.length ? quantile(devs, 0.5) : 0,
+      tuning: S.devsAll.length ? quantile(S.devsAll, 0.5) : 0,
       gate: hi > lo ? Math.sqrt(lo * hi) : lo,
-      noise: S.noise, minLevel, weak: hi < lo * 2,
+      noise: S.noise, noise90: S.noise90, minLevel, weak: minLevel < S.noise90 * 8,
       okCount: ok.length, total: notes.length,
-      bad: S.results.filter(r => !r || !r.ok).map(r => r.midi),
-      notes: S.results.map(r => ({ midi:r.midi, level:r.level, agree:r.agree, ok:!!r.ok, heard:r.heard }))
+      bad: S.results.filter(r => !r || !r.ok).map(r => ({ midi:r.midi, heard:r.heard })),
+      notes: S.results.map(r => ({ midi:r.midi, level:r.level, agree:r.agree, ok:!!r.ok, heard:r.heard, cents:r.cents }))
     };
     cb.onState(S);
   }
   return {
     state: S, feed,
-    skip(now){ S.results[S.idx] = { midi:notes[S.idx], skipped:true, ok:false, level:0, agree:0, devs:[], heard:null }; next(now); }
+    skip(now){ S.results[S.idx] = { midi:notes[S.idx], skipped:true, ok:false, level:0, agree:0, devs:[], heard:null, cents:null }; next(now); }
   };
 }
 
@@ -591,48 +652,81 @@ const audio = {
 };
 
 /* ---------- Micro ---------- */
+// Le son est analysé à cadence fixe (toutes les 768 échantillons), indépendamment de l'affichage :
+// sur iPad en mode économie d'énergie, l'écran passe à 30 images par seconde.
+const TAP_WORKLET = `class Tap extends AudioWorkletProcessor {
+  constructor(){ super(); this.buf = new Float32Array(2048); this.filled = 0; this.since = 0; }
+  process(inputs){
+    const ch = inputs[0] && inputs[0][0];
+    if (ch){
+      const b = this.buf, k = ch.length;
+      b.copyWithin(0, k); b.set(ch, b.length - k);
+      this.filled += k; this.since += k;
+      if (this.since >= 768 && this.filled >= b.length){ this.since = 0; this.port.postMessage(b.slice(0)); }
+    }
+    return true;
+  }
+}
+registerProcessor('note-tap', Tap);`;
 const mic = {
-  analyser:null, buf:null, listener:null, running:false, lastText:0, frames:0, savedTuning:null,
+  analyser:null, buf:null, listener:null, running:false, lastText:0, frames:0, savedTuning:null, mode:'',
+  lastInfo:null, lastFrameAt:0,
   async start(){
     const ctx = audio.ensure();
     if (!ctx || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('unsupported');
     const stream = await navigator.mediaDevices.getUserMedia({ audio:{ echoCancellation:false, noiseSuppression:false, autoGainControl:false } });
     if (ctx.state !== 'running') { try { await ctx.resume(); } catch(e){} }
     const src = ctx.createMediaStreamSource(stream);
-    this.analyser = ctx.createAnalyser();
-    this.analyser.fftSize = 2048;
-    src.connect(this.analyser);
     // Safari ne fait circuler le son que si la chaîne aboutit aux haut-parleurs : on la relie, à volume nul
-    const silent = ctx.createGain(); silent.gain.value = 0;
-    this.analyser.connect(silent); silent.connect(ctx.destination);
-    this.buf = new Float32Array(this.analyser.fftSize);
+    const silent = ctx.createGain(); silent.gain.value = 0; silent.connect(ctx.destination);
     this.savedTuning = store.get('tuning', 0);
     this.listener = createListener({
-      sr: ctx.sampleRate, gateFor, tuning: this.savedTuning,
+      sr: ctx.sampleRate, gateFor,
+      anchor: calibOk() ? settings.calib.tuning : undefined, tuning: calibOk() ? 0 : this.savedTuning,
       framesNeeded: m => game.framesNeeded(m), onNote: m => game.onNote(m)
     });
+    try {
+      if (!ctx.audioWorklet || !window.AudioWorkletNode) throw 0;
+      const url = URL.createObjectURL(new Blob([TAP_WORKLET], { type:'application/javascript' }));
+      await ctx.audioWorklet.addModule(url);
+      const node = new AudioWorkletNode(ctx, 'note-tap', { numberOfInputs:1, numberOfOutputs:1, outputChannelCount:[1] });
+      node.port.onmessage = e => this.frame(e.data);
+      src.connect(node); node.connect(silent);
+      this.mode = 'worklet';
+    } catch(e){
+      this.analyser = ctx.createAnalyser();
+      this.analyser.fftSize = 2048;
+      src.connect(this.analyser); this.analyser.connect(silent);
+      this.buf = new Float32Array(2048);
+      this.mode = 'affichage';
+      requestAnimationFrame(() => this.tick());
+    }
     this.running = true;
-    requestAnimationFrame(() => this.tick());
+    // Si l'iPad coupe le son (appel, autre appli), on relance l'écoute
+    setInterval(() => { if (audio.ctx && audio.ctx.state !== 'running') audio.ctx.resume(); }, 1000);
   },
   tick(){
     if (!this.running) return;
-    if (audio.ctx && audio.ctx.state !== 'running') audio.ctx.resume();
     this.analyser.getFloatTimeDomainData(this.buf);
-    const info = this.listener.process(this.buf, performance.now() < audio.muteUntil);
-    if (cal.run && cal.run.state.phase !== 'done') cal.run.feed(info, performance.now());
-    if (++this.frames % 120 === 0 && this.listener.learned > 20){
+    this.frame(this.buf);
+    requestAnimationFrame(() => this.tick());
+  },
+  frame(buf){
+    const now = performance.now();
+    this.lastFrameAt = now;
+    const info = this.listener.process(buf, now < audio.muteUntil);
+    this.lastInfo = info;
+    if (cal.run && cal.run.state.phase !== 'done') cal.run.feed(info, now);
+    if (++this.frames % 120 === 0 && !this.listener.anchored && this.listener.learned > 20){
       const tu = Math.round(this.listener.tuning * 100) / 100;
       if (tu !== this.savedTuning){ this.savedTuning = tu; store.set('tuning', tu); }
     }
-    this.meter(info);
-    requestAnimationFrame(() => this.tick());
+    this.meter(info, now);
   },
-  meter(info){
-    const pos = v => Math.max(0, Math.min(1, (Math.log10(Math.max(v, 1e-4)) + 4) / 3.5)) * 100;
-    $('#meterBar').style.width = pos(info.rms) + '%';
-    $('#meterGate').style.left = pos(info.gate) + '%';
-    if (info.midi !== null) this.lastNote = { midi:info.midi, freq:info.freq, cents:info.cents, at:performance.now() };
-    const now = performance.now();
+  meter(info, now){
+    $('#meterBar').style.width = meterPos(info.rms, info.noise) + '%';
+    $('#meterGate').style.left = meterPos(info.gate, info.noise) + '%';
+    if (info.midi !== null) this.lastNote = { midi:info.midi, freq:info.freq, cents:info.cents, at:now };
     if (now - this.lastText < 150) return;
     this.lastText = now;
     const recent = this.lastNote && now - this.lastNote.at < 400 ? this.lastNote : null;
@@ -640,19 +734,19 @@ const mic = {
     if (!$('#settings').hidden) renderDiag(info, recent);
   }
 };
+// Compteur en décibels au-dessus du bruit de la pièce : 0 = bruit, plein = 45 dB au-dessus
+const meterPos = (v, noise) => Math.max(0, Math.min(1, 20 * Math.log10(Math.max(v, 1e-9) / Math.max(noise, 1e-9)) / 45)) * 100;
 function renderDiag(info, recent){
-  const pos = v => Math.max(0, Math.min(1, (Math.log10(Math.max(v, 1e-4)) + 4) / 3.5)) * 100;
-  $('#dBar').style.width = pos(info.rms) + '%';
-  $('#dGate').style.left = pos(info.gate) + '%';
+  $('#dBar').style.width = meterPos(info.rms, info.noise) + '%';
+  $('#dGate').style.left = meterPos(info.gate, info.noise) + '%';
   $('#dVol').textContent = info.rms > info.gate ? 'assez fort' : 'trop faible';
   $('#dVol').className = info.rms > info.gate ? 'ok' : 'ko';
   $('#dNote').textContent = recent
     ? `${PC_NAME[mod(recent.midi, 12)]} (${Math.round(recent.freq)} Hz)`
     : (info.rms > info.gate ? 'son sans note nette' : 'aucune');
-  const c = Math.round(mic.listener.tuning * 100);
-  $('#dTune').textContent = mic.listener.learned < 6 ? 'jouez quelques notes pour le mesurer'
-    : Math.abs(c) < 6 ? 'juste'
-    : `${Math.abs(c)} centièmes de demi-ton ${c < 0 ? 'trop bas' : 'trop haut'}, compensé automatiquement`;
+  $('#dTune').textContent = mic.listener.anchored ? tuningText(mic.listener.tuning) + ' (mesuré au calibrage)'
+    : mic.listener.learned < 6 ? 'jouez quelques notes pour le mesurer'
+    : tuningText(mic.listener.tuning);
 }
 
 /* ---------- MIDI ---------- */
@@ -739,10 +833,11 @@ function endCalibration(save){
   const S = cal.run.state;
   if (save && S.summary){
     const s = S.summary;
-    settings.calib = { gate:s.gate, tuning:s.tuning, noise:s.noise, minLevel:s.minLevel, at:Date.now(),
-                       okCount:s.okCount, total:s.total, notes:s.notes };
+    settings.calib = { v:CALIB_VERSION, gate:s.gate, tuning:s.tuning, noise:s.noise, noise90:s.noise90, minLevel:s.minLevel,
+                       at:Date.now(), okCount:s.okCount, total:s.total, notes:s.notes };
+    settings.sensitivity = 0.5;   // le calibrage règle le seuil : on repart du milieu
     store.set('settings', settings);
-    if (mic.listener) mic.listener.setTuning(s.tuning);
+    if (mic.listener) mic.listener.setAnchor(s.tuning);
   }
   cal.run = null;
   $('#calib').hidden = true;
@@ -784,7 +879,7 @@ function renderCalib(S){
     $('#calText').textContent = enough
       ? "L'appli connaît maintenant le son de ton piano."
       : "Je n'ai pas assez bien entendu le piano pour me régler. Rapproche la tablette du piano et recommence.";
-    const bad = s.bad.map(m => PC_NAME[mod(m, 12)]).join(', ');
+    const bad = s.bad.map(b => PC_NAME[mod(b.midi, 12)] + (b.heard !== null && b.heard !== mod(b.midi, 12) ? ` (entendu ${PC_NAME[b.heard]})` : '')).join(', ');
     $('#calSum').innerHTML =
       `<dt>Notes bien entendues</dt><dd>${s.okCount} sur ${s.total}${bad ? ' · à surveiller : ' + bad : ''}</dd>` +
       (enough ? `<dt>Accordage du piano</dt><dd>${tuningText(s.tuning)}</dd>` : '') +
@@ -795,19 +890,25 @@ function renderCalib(S){
     const rb = calButton('Copier le rapport pour Claude', 'ghost small', () => copyReport(rb, $('#calReport'), S.summary));
   }
 }
+const APP_VERSION = '2026-10-02';
 function reportText(summary){
   const c = summary || settings.calib;
   const noteName = m => PC_NAME[mod(m, 12)] + (Math.floor(m / 12) - 1);
+  const n5 = v => v === undefined || v === null ? null : +(+v).toPrecision(3);
+  const li = mic.lastInfo;
   return JSON.stringify({
-    app:'note-a-note', date:new Date().toISOString(), appareil:navigator.userAgent,
+    app:'note-a-note', version:APP_VERSION, date:new Date().toISOString(), appareil:navigator.userAgent,
+    ecranTactile: navigator.maxTouchPoints || 0, ecoute: mic.mode || null,
     frequenceEchantillonnage: audio.ctx ? audio.ctx.sampleRate : null,
     sensibilite: settings.sensitivity, autreOctaveAcceptee: settings.anyOctave,
-    accordageMesureEnDirect: mic.listener ? Math.round(mic.listener.tuning * 100) : null,
+    enDirect: mic.listener ? { accordageCentiemes: Math.round(mic.listener.tuning * 100), ancre: mic.listener.anchored,
+      bruit: li ? n5(li.noise) : null, seuil: li ? n5(li.gate) : null } : null,
     calibrage: c ? {
-      seuil: +(+c.gate).toFixed(5), bruit: +(+c.noise).toFixed(5), volumeMin: +(+c.minLevel).toFixed(5),
+      version: c.v || 1, seuil: n5(c.gate), bruit: n5(c.noise), bruit90: n5(c.noise90), volumeMin: n5(c.minLevel),
       accordageCentiemes: Math.round(c.tuning * 100),
-      notes: (c.notes || []).map(n => ({ note:noteName(n.midi), volume:+(+n.level).toFixed(4), entendue:Math.round(n.agree * 100) + '%',
-        ok:n.ok, entenduCommme: n.heard === null || n.heard === undefined ? null : PC_NAME[n.heard] }))
+      notes: (c.notes || []).map(n => ({ note:noteName(n.midi), volume:n5(n.level), entendue:Math.round(n.agree * 100) + '%',
+        ok:n.ok, entenduComme: n.heard === null || n.heard === undefined ? null : PC_NAME[n.heard],
+        centiemes: n.cents === undefined ? null : n.cents }))
     } : null
   }, null, 1);
 }
@@ -877,7 +978,7 @@ const game = {
   },
   matches(midi, d){ const t = dToMidi(d); return settings.anyOctave ? mod(midi - t, 12) === 0 : midi === t; },
   framesNeeded(midi){
-    const r = this.round; if (!r || r.done || this.busy || !this.started || midi < 48) return 99;
+    const r = this.round; if (!r || r.done || this.busy || !this.started || midi < 55) return 99;
     if (this.matches(midi, r.targets[r.idx])) return 3;
     // Juste après une bonne note, ce qu'on entend est souvent la fin de cette note : pas d'erreur
     return performance.now() - this.lastCorrectAt < 350 ? 99 : 6;
@@ -971,8 +1072,8 @@ function openSettings(){
   renderStats();
   $('#diagOff').hidden = !!mic.running; $('#diagOn').hidden = !mic.running;
   const c = settings.calib;
-  $('#calStatus').textContent = c
-    ? `Calibrage fait le ${new Date(c.at).toLocaleDateString('fr-FR', { day:'numeric', month:'long' })} : ${c.okCount} notes sur ${c.total} bien entendues, piano ${tuningText(c.tuning).replace(', compensé automatiquement', '')}.`
+  $('#calStatus').textContent = c && !calibOk() ? "L'appli a changé depuis le dernier calibrage : il sera refait au prochain démarrage."
+    : c ? `Calibrage fait le ${new Date(c.at).toLocaleDateString('fr-FR', { day:'numeric', month:'long' })} : ${c.okCount} notes sur ${c.total} bien entendues, piano ${tuningText(c.tuning).replace(', compensé automatiquement', '')}.`
     : "Calibrage pas encore fait.";
   $('#setReport').hidden = true; $('#reportBtn').textContent = 'Copier le rapport pour Claude';
   const rb = $('#resetBtn'); rb.classList.remove('armed'); rb.textContent = 'Tout remettre à zéro';
@@ -1062,7 +1163,7 @@ $('#startBtn').addEventListener('click', async () => {
   $('#home').hidden = true;
   keepAwake();
   const go = () => { game.started = true; if (mic.listener) mic.listener.reset(); game.newRound(); };
-  if (src === 'mic' && !settings.calib) startCalibration(go); else go();
+  if (src === 'mic' && !calibOk()) startCalibration(go); else go();
 });
 
 buildKeyboard();
